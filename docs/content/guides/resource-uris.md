@@ -47,16 +47,49 @@ URI offline, the same work `ta ref id` does.
 
 ## Walking the graph
 
-Each location record carries edges to its reviews, photos, and parent geo as
-`kit:"link"` tags, so a host can follow the graph and write it to disk:
+Each location record carries `kit:"link"` edges, so a host can follow the graph
+and write it to disk:
+
+| Edge | Points at | Direction |
+| --- | --- | --- |
+| `reviews_ref` | the location's reviews | out to a list |
+| `photos_ref` | the location's photos | out to a list |
+| `nearby_ref` | locations near its coordinate | out to a list |
+| `parent_ref` | its nearest geo (city or region) | up one step |
+| `ancestor_refs` | every geo ancestor (city, region, country) | up the whole tree |
+| `neighborhood_refs` | the sub-geos inside it (districts) | down the tree |
+
+The geo edges make the tree walkable both ways from any seed. `ancestor_refs`
+climbs from a place to its city, region, and country in one expansion, and
+`neighborhood_refs` descends a city into the districts inside it. Each ancestor
+and neighborhood is itself a `location` id, so a crawl follows them like any
+other edge.
 
 ```bash
-ant ls     tripadvisor://location/188757            # the edges into reviews, photos, parent
-ant export tripadvisor://location/188757 --follow 1 --to ./data
+ant ls     tripadvisor://location/188757            # the edges out of this location
+ant export tripadvisor://location/188757 --follow 2 --to ./data
 ```
 
 `ant export --follow` and `ant graph` walk those edges, across tools when a link
 points at another site's scheme.
+
+## Reconstructing the site
+
+The sitemap backbone plus the geo tree reach every public page. `sitemaps` reads
+the per-section indexes that `robots.txt` advertises, each `sitemap` index lists
+shards, and each shard enumerates landing pages as `Seed` records. A seed fills a
+`location` edge whenever a `d`-number resolves from its URL, so a breadth-first
+walk runs from the sitemap roots down to every location, then sideways through
+`ancestor_refs` and `neighborhood_refs` to fill the geo hierarchy:
+
+```bash
+ta sitemaps                                  # the index roots, the backbone
+ant export tripadvisor://sitemaps --follow 3 --to ./data
+```
+
+No record is a dead leaf: a review and a photo both link back to their location,
+and a location links up to its ancestors and down to its neighborhoods, so a host
+that starts anywhere can reach the rest of the public graph.
 
 ## Why this is the same code
 

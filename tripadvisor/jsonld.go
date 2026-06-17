@@ -28,6 +28,30 @@ func ldBlocks(body []byte) [][]byte {
 	return out
 }
 
+// ldNodes returns every JSON-LD node in body, expanding an @graph wrapper so a
+// node nested in a @graph array is reached the same way as a top-level island.
+// TripAdvisor serves the place island sometimes bare and sometimes inside a
+// @graph alongside the BreadcrumbList, so both shapes parse through one path.
+func ldNodes(body []byte) [][]byte {
+	var out [][]byte
+	for _, block := range ldBlocks(body) {
+		var probe struct {
+			Graph json.RawMessage `json:"@graph"`
+		}
+		if err := json.Unmarshal(block, &probe); err == nil && len(probe.Graph) > 0 {
+			var nodes []json.RawMessage
+			if err := json.Unmarshal(probe.Graph, &nodes); err == nil {
+				for _, n := range nodes {
+					out = append(out, bytes.TrimSpace(n))
+				}
+				continue
+			}
+		}
+		out = append(out, block)
+	}
+	return out
+}
+
 // ldDoc is the subset of a schema.org place island ta reads.
 type ldDoc struct {
 	Type            jsonType   `json:"@type"`
@@ -143,7 +167,7 @@ func categoryFor(t string) string {
 // and geo supplied by the caller (they come from the page URL, not the island). It
 // returns nil when no block is a place island.
 func locationFromLD(body []byte, id, geo, webURL string) *Location {
-	for _, block := range ldBlocks(body) {
+	for _, block := range ldNodes(body) {
 		var d ldDoc
 		if err := json.Unmarshal(block, &d); err != nil {
 			continue // one malformed block must not sink the rest
@@ -175,8 +199,104 @@ func locationFromLD(body []byte, id, geo, webURL string) *Location {
 		if len(d.Image) > 0 {
 			loc.Image = d.Image[0]
 		}
+		// The island carries no geo chain, but the page's BreadcrumbList does, so a
+		// keyless web read still reconstructs the lineage the API would have given.
+		loc.Ancestors = ancestorsFromLD(body, id)
 		wireLocationEdges(loc)
 		return loc
+	}
+	return nil
+}
+
+// ldBreadcrumb is a schema.org BreadcrumbList, the page's geo trail.
+type ldBreadcrumb struct {
+	Type  jsonType  `json:"@type"`
+	Items []ldCrumb `json:"itemListElement"`
+}
+
+type ldCrumb struct {
+	Position int    `json:"position"`
+	Name     string `json:"name"`
+	Item     ldItem `json:"item"`
+}
+
+// ldItem decodes a breadcrumb item that is either a bare URL string or an object
+// carrying @id (or url) and an optional name.
+type ldItem struct {
+	URL  string
+	Name string
+}
+
+func (i *ldItem) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
+		return nil
+	}
+	if b[0] == '"' {
+		return json.Unmarshal(b, &i.URL)
+	}
+	var obj struct {
+		ID   string `json:"@id"`
+		URL  string `json:"url"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return nil
+	}
+	i.URL = firstNonEmpty(obj.ID, obj.URL)
+	i.Name = obj.Name
+	return nil
+}
+
+// ancestorsFromLD reads a BreadcrumbList island into the geo lineage, nearest
+// first. The trail runs top-down (country to the place itself); the place's own
+// crumb (the one resolving back to locID) and any crumb that is not a geo are
+// dropped, duplicates are removed, and the rest are reversed so the nearest geo is
+// first, matching the API's ancestor order.
+func ancestorsFromLD(body []byte, locID string) []Ancestor {
+	for _, node := range ldNodes(body) {
+		var bc ldBreadcrumb
+		if err := json.Unmarshal(node, &bc); err != nil {
+			continue
+		}
+		if string(bc.Type) != "BreadcrumbList" || len(bc.Items) == 0 {
+			continue
+		}
+		var chain []Ancestor
+		seen := map[string]bool{}
+		for _, it := range bc.Items {
+			if it.Item.URL == "" {
+				continue
+			}
+			r := Classify(it.Item.URL)
+			if r.Kind != "location" || r.ID == "" || r.ID == locID || seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			chain = append(chain, Ancestor{ID: r.ID, Name: squish(firstNonEmpty(it.Item.Name, it.Name))})
+		}
+		for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
+			chain[i], chain[j] = chain[j], chain[i]
+		}
+		if len(chain) > 0 {
+			return chain
+		}
+	}
+	return nil
+}
+
+// imagesFromLD returns every image URL the first place island carries, so the web
+// photos fallback surfaces all island images, not only the hero.
+func imagesFromLD(body []byte) []string {
+	for _, node := range ldNodes(body) {
+		var d ldDoc
+		if err := json.Unmarshal(node, &d); err != nil {
+			continue
+		}
+		if categoryFor(string(d.Type)) == "" {
+			continue
+		}
+		return trimAll(d.Image)
 	}
 	return nil
 }
@@ -184,7 +304,7 @@ func locationFromLD(body []byte, id, geo, webURL string) *Location {
 // reviewsFromLD lifts the embedded review array of the first place island, the
 // recent-reviews subset the web plane carries. id is the reviewed location.
 func reviewsFromLD(body []byte, id string) []*Review {
-	for _, block := range ldBlocks(body) {
+	for _, block := range ldNodes(body) {
 		var d ldDoc
 		if err := json.Unmarshal(block, &d); err != nil {
 			continue
@@ -210,7 +330,10 @@ func reviewsFromLD(body []byte, id string) []*Review {
 	return nil
 }
 
-// wireLocationEdges fills the graph edges that derive from a location's own id.
+// wireLocationEdges fills the graph edges that derive from a location's own id and
+// its geo lineage. The reviews/photos edges are the location id; the parent is the
+// nearest geo; ancestor_refs and neighborhood_refs are the up and down geo edges a
+// crawl follows to reach the whole hierarchy; nearby is the coordinate.
 func wireLocationEdges(loc *Location) {
 	if loc.ID == "" {
 		return
@@ -219,6 +342,24 @@ func wireLocationEdges(loc *Location) {
 	loc.PhotosRef = loc.ID
 	if loc.GeoID != "" && loc.GeoID != loc.ID {
 		loc.ParentRef = loc.GeoID
+	}
+	loc.AncestorRefs = loc.AncestorRefs[:0]
+	for _, a := range loc.Ancestors {
+		if a.ID != "" && a.ID != loc.ID {
+			loc.AncestorRefs = append(loc.AncestorRefs, a.ID)
+		}
+	}
+	if len(loc.AncestorRefs) == 0 {
+		loc.AncestorRefs = nil
+	}
+	loc.NeighborhoodRefs = loc.NeighborhoodRefs[:0]
+	for _, n := range loc.Neighborhoods {
+		if n.ID != "" && n.ID != loc.ID {
+			loc.NeighborhoodRefs = append(loc.NeighborhoodRefs, n.ID)
+		}
+	}
+	if len(loc.NeighborhoodRefs) == 0 {
+		loc.NeighborhoodRefs = nil
 	}
 	if loc.Lat != 0 || loc.Lng != 0 {
 		loc.NearbyRef = strconv.FormatFloat(loc.Lat, 'f', -1, 64) + "," +
