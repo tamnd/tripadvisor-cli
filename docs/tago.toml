@@ -1,0 +1,10 @@
+title       = "ta"
+baseURL     = "https://tripadvisor-cli.tamnd.com/"
+description = "A command line for TripAdvisor."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/tripadvisor-cli"
