@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -78,33 +79,59 @@ type apiHours struct {
 }
 
 type apiLocation struct {
-	LocationID  string        `json:"location_id"`
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	WebURL      string        `json:"web_url"`
-	Address     apiAddress    `json:"address_obj"`
-	Ancestors   []apiAncestor `json:"ancestors"`
-	Latitude    fnum          `json:"latitude"`
-	Longitude   fnum          `json:"longitude"`
-	Timezone    string        `json:"timezone"`
-	Phone       string        `json:"phone"`
-	Website     string        `json:"website"`
-	Email       string        `json:"email"`
-	Rating      fnum          `json:"rating"`
-	NumReviews  fnum          `json:"num_reviews"`
-	RatingImage string        `json:"rating_image_url"`
-	PriceLevel  string        `json:"price_level"`
-	Ranking     apiRanking    `json:"ranking_data"`
-	Hours       apiHours      `json:"hours"`
-	Category    apiNamed      `json:"category"`
-	Subcategory []apiNamed    `json:"subcategory"`
-	Groups      []apiGroup    `json:"groups"`
-	Cuisine     []apiNamed    `json:"cuisine"`
-	TripTypes   []apiNamed    `json:"trip_types"`
-	Styles      []string      `json:"styles"`
-	Amenities   []string      `json:"amenities"`
-	Awards      []apiAward    `json:"awards"`
-	PhotoCount  fnum          `json:"photo_count"`
+	LocationID   string                  `json:"location_id"`
+	Name         string                  `json:"name"`
+	LocalName    string                  `json:"local_name"`
+	LocalAddress string                  `json:"local_address"`
+	Description  string                  `json:"description"`
+	WebURL       string                  `json:"web_url"`
+	SeeAllPhotos string                  `json:"see_all_photos"`
+	WriteReview  string                  `json:"write_review"`
+	Address      apiAddress              `json:"address_obj"`
+	Ancestors    []apiAncestor           `json:"ancestors"`
+	Neighborhood []apiNeighborhood       `json:"neighborhood_info"`
+	Latitude     fnum                    `json:"latitude"`
+	Longitude    fnum                    `json:"longitude"`
+	Timezone     string                  `json:"timezone"`
+	Phone        string                  `json:"phone"`
+	Website      string                  `json:"website"`
+	Email        string                  `json:"email"`
+	Rating       fnum                    `json:"rating"`
+	NumReviews   fnum                    `json:"num_reviews"`
+	RatingCounts map[string]fnum         `json:"review_rating_count"`
+	Subratings   map[string]apiSubrating `json:"subratings"`
+	RatingImage  string                  `json:"rating_image_url"`
+	PriceLevel   string                  `json:"price_level"`
+	Ranking      apiRanking              `json:"ranking_data"`
+	Hours        apiHours                `json:"hours"`
+	Category     apiNamed                `json:"category"`
+	Subcategory  []apiNamed              `json:"subcategory"`
+	Groups       []apiGroup              `json:"groups"`
+	Cuisine      []apiNamed              `json:"cuisine"`
+	TripTypes    []apiNamed              `json:"trip_types"`
+	Styles       []string                `json:"styles"`
+	Amenities    []string                `json:"amenities"`
+	Features     []string                `json:"features"`
+	Awards       []apiAward              `json:"awards"`
+	PhotoCount   fnum                    `json:"photo_count"`
+}
+
+type apiNeighborhood struct {
+	Name       string `json:"name"`
+	LocationID string `json:"location_id"`
+}
+
+type apiSubrating struct {
+	Name          string `json:"name"`
+	LocalizedName string `json:"localized_name"`
+	Value         fnum   `json:"value"`
+}
+
+func (s apiSubrating) text() string {
+	if s.LocalizedName != "" {
+		return s.LocalizedName
+	}
+	return s.Name
 }
 
 type apiGroup struct {
@@ -121,37 +148,47 @@ type apiAward struct {
 // toLocation maps an API location envelope onto the shared record.
 func (a apiLocation) toLocation() *Location {
 	loc := &Location{
-		ID:           a.LocationID,
-		Name:         squish(a.Name),
-		Category:     normalizeCategory(a.Category.text()),
-		Rating:       a.Rating.float(),
-		NumReviews:   a.NumReviews.int(),
-		Ranking:      squish(a.Ranking.RankingString),
-		RankingPos:   a.Ranking.Ranking.int(),
-		RankingOutOf: a.Ranking.RankingOutOf.int(),
-		PriceLevel:   strings.TrimSpace(a.PriceLevel),
-		Cuisine:      namedList(a.Cuisine),
-		Amenities:    trimAll(a.Amenities),
-		Styles:       trimAll(a.Styles),
-		TripTypes:    namedList(a.TripTypes),
-		Awards:       awardList(a.Awards),
-		Phone:        strings.TrimSpace(a.Phone),
-		Website:      strings.TrimSpace(a.Website),
-		Email:        strings.TrimSpace(a.Email),
-		Street:       squish(joinStreet(a.Address)),
-		City:         squish(a.Address.City),
-		State:        squish(a.Address.State),
-		Country:      squish(a.Address.Country),
-		Postal:       strings.TrimSpace(a.Address.PostalCode),
-		Address:      squish(a.Address.AddressString),
-		Lat:          a.Latitude.float(),
-		Lng:          a.Longitude.float(),
-		Timezone:     strings.TrimSpace(a.Timezone),
-		Hours:        trimAll(a.Hours.WeekdayText),
-		Description:  squish(a.Description),
-		PhotoCount:   a.PhotoCount.int(),
-		RatingImage:  strings.TrimSpace(a.RatingImage),
-		URL:          strings.TrimSpace(a.WebURL),
+		ID:            a.LocationID,
+		Name:          squish(a.Name),
+		LocalName:     squish(a.LocalName),
+		Category:      normalizeCategory(a.Category.text()),
+		Groups:        groupList(a.Groups),
+		Rating:        a.Rating.float(),
+		NumReviews:    a.NumReviews.int(),
+		RatingCounts:  ratingCounts(a.RatingCounts),
+		Subratings:    subratingList(a.Subratings),
+		Ranking:       squish(a.Ranking.RankingString),
+		RankingPos:    a.Ranking.Ranking.int(),
+		RankingOutOf:  a.Ranking.RankingOutOf.int(),
+		PriceLevel:    strings.TrimSpace(a.PriceLevel),
+		Cuisine:       namedList(a.Cuisine),
+		Amenities:     trimAll(a.Amenities),
+		Features:      trimAll(a.Features),
+		Styles:        trimAll(a.Styles),
+		TripTypes:     namedList(a.TripTypes),
+		Awards:        awardList(a.Awards),
+		Phone:         strings.TrimSpace(a.Phone),
+		Website:       strings.TrimSpace(a.Website),
+		Email:         strings.TrimSpace(a.Email),
+		Street:        squish(joinStreet(a.Address)),
+		City:          squish(a.Address.City),
+		State:         squish(a.Address.State),
+		Country:       squish(a.Address.Country),
+		Postal:        strings.TrimSpace(a.Address.PostalCode),
+		Address:       squish(a.Address.AddressString),
+		LocalAddress:  squish(a.LocalAddress),
+		Lat:           a.Latitude.float(),
+		Lng:           a.Longitude.float(),
+		Timezone:      strings.TrimSpace(a.Timezone),
+		Hours:         trimAll(a.Hours.WeekdayText),
+		Ancestors:     ancestorList(a.Ancestors),
+		Neighborhoods: neighborhoodList(a.Neighborhood),
+		Description:   squish(a.Description),
+		PhotoCount:    a.PhotoCount.int(),
+		SeeAllPhotos:  strings.TrimSpace(a.SeeAllPhotos),
+		WriteReview:   strings.TrimSpace(a.WriteReview),
+		RatingImage:   strings.TrimSpace(a.RatingImage),
+		URL:           strings.TrimSpace(a.WebURL),
 	}
 	for _, s := range a.Subcategory {
 		if v := s.text(); v != "" {
@@ -171,6 +208,104 @@ func geoAncestor(ancestors []apiAncestor) string {
 		}
 	}
 	return ""
+}
+
+// ancestorList maps the API ancestor chain onto the record, nearest first, keeping
+// only the entries that carry an id (the addressable geo nodes).
+func ancestorList(in []apiAncestor) []Ancestor {
+	var out []Ancestor
+	for _, a := range in {
+		if a.LocationID == "" {
+			continue
+		}
+		out = append(out, Ancestor{
+			ID:    a.LocationID,
+			Name:  squish(a.Name),
+			Level: squish(a.Level),
+		})
+	}
+	return out
+}
+
+// neighborhoodList maps neighborhood_info onto the record's sub-geo nodes.
+func neighborhoodList(in []apiNeighborhood) []Neighborhood {
+	var out []Neighborhood
+	for _, n := range in {
+		if n.LocationID == "" {
+			continue
+		}
+		out = append(out, Neighborhood{ID: n.LocationID, Name: squish(n.Name)})
+	}
+	return out
+}
+
+// groupList flattens the grouped taxonomy (groups[].categories[]) into a flat,
+// deduplicated list of category names.
+func groupList(in []apiGroup) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, g := range in {
+		for _, c := range g.Categories {
+			v := squish(c.text())
+			if v == "" || seen[v] {
+				continue
+			}
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// ratingCounts copies the review_rating_count histogram, dropping zero buckets.
+func ratingCounts(in map[string]fnum) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for k, v := range in {
+		if n := v.int(); n > 0 {
+			out[strings.TrimSpace(k)] = n
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// subratingList flattens the subratings map into a slice ordered by the map's
+// numeric keys ("0","1",...), so the output is stable across runs.
+func subratingList(in map[string]apiSubrating) []Subrating {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return subKeyLess(keys[i], keys[j]) })
+	var out []Subrating
+	for _, k := range keys {
+		s := in[k]
+		name := squish(s.text())
+		if name == "" {
+			continue
+		}
+		out = append(out, Subrating{Name: name, Value: s.Value.float()})
+	}
+	return out
+}
+
+// subKeyLess orders subrating map keys numerically when they are numbers, else
+// lexically, so "10" sorts after "2".
+func subKeyLess(a, b string) bool {
+	ai, aerr := strconv.Atoi(a)
+	bi, berr := strconv.Atoi(b)
+	if aerr == nil && berr == nil {
+		return ai < bi
+	}
+	return a < b
 }
 
 // normalizeCategory folds the API category name to ta's vocabulary.
@@ -232,20 +367,22 @@ type apiReviewList struct {
 }
 
 type apiReview struct {
-	ID            json.Number `json:"id"`
-	LocationID    string      `json:"location_id"`
-	Lang          string      `json:"lang"`
-	PublishedDate string      `json:"published_date"`
-	Rating        fnum        `json:"rating"`
-	HelpfulVotes  fnum        `json:"helpful_votes"`
-	RatingImage   string      `json:"rating_image_url"`
-	URL           string      `json:"url"`
-	TripType      string      `json:"trip_type"`
-	TravelDate    string      `json:"travel_date"`
-	Text          string      `json:"text"`
-	Title         string      `json:"title"`
-	OwnerResp     *apiOwner   `json:"owner_response"`
-	User          apiUser     `json:"user"`
+	ID            json.Number             `json:"id"`
+	LocationID    string                  `json:"location_id"`
+	Lang          string                  `json:"lang"`
+	PublishedDate string                  `json:"published_date"`
+	Rating        fnum                    `json:"rating"`
+	HelpfulVotes  fnum                    `json:"helpful_votes"`
+	RatingImage   string                  `json:"rating_image_url"`
+	URL           string                  `json:"url"`
+	TripType      string                  `json:"trip_type"`
+	TravelDate    string                  `json:"travel_date"`
+	Text          string                  `json:"text"`
+	Title         string                  `json:"title"`
+	Translated    bool                    `json:"is_machine_translated"`
+	Subratings    map[string]apiSubrating `json:"subratings"`
+	OwnerResp     *apiOwner               `json:"owner_response"`
+	User          apiUser                 `json:"user"`
 }
 
 type apiOwner struct {
@@ -277,6 +414,8 @@ func (a apiReview) toReview(loc string) *Review {
 		AuthorLoc:    squish(a.User.UserLocation.Name),
 		HelpfulVotes: a.HelpfulVotes.int(),
 		Language:     strings.TrimSpace(a.Lang),
+		Translated:   a.Translated,
+		Subratings:   subratingList(a.Subratings),
 		RatingImage:  strings.TrimSpace(a.RatingImage),
 		URL:          strings.TrimSpace(a.URL),
 	}
@@ -297,6 +436,7 @@ type apiPhoto struct {
 	Caption       string      `json:"caption"`
 	PublishedDate string      `json:"published_date"`
 	Album         string      `json:"album"`
+	Blessed       bool        `json:"is_blessed"`
 	Source        apiNamed    `json:"source"`
 	User          apiUser     `json:"user"`
 	Images        apiImageSet `json:"images"`
@@ -323,6 +463,7 @@ func (a apiPhoto) toPhoto(loc string) *Photo {
 		Caption:   squish(a.Caption),
 		Published: strings.TrimSpace(a.PublishedDate),
 		Album:     squish(a.Album),
+		Blessed:   a.Blessed,
 		Source:    squish(a.Source.text()),
 		Author:    squish(a.User.Username),
 		Thumbnail: a.Images.Thumbnail.URL,

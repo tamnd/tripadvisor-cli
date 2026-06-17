@@ -50,25 +50,32 @@ func (c *Client) WebReviews(ctx context.Context, ref string, limit int) ([]*Revi
 	return out, nil
 }
 
-// WebPhotos is the thin web fallback for photos: it reads the location page's
-// island and emits the single hero image it carries. The reliable source is the
-// Content API; this returns at most one Photo so a keyless run still surfaces the
-// page image rather than nothing.
+// WebPhotos is the web fallback for photos: it reads the location page's island
+// and emits every image the island carries. The reliable, paginated source is the
+// Content API; this surfaces what a keyless page read exposes, which is usually a
+// small set of hero and gallery images rather than the full photo stream.
 func (c *Client) WebPhotos(ctx context.Context, ref string, limit int) ([]*Photo, error) {
-	loc, err := c.WebLocation(ctx, ref)
+	pageURL, id, _, err := c.webTarget(ref)
 	if err != nil {
 		return nil, err
 	}
-	if loc.Image == "" {
-		return nil, nil
+	body, err := c.get(ctx, pageURL)
+	if err != nil {
+		return nil, err
 	}
-	return []*Photo{{
-		ID:       loc.ID + "-hero",
-		Location: loc.ID,
-		Caption:  loc.Name,
-		Original: loc.Image,
-		Large:    loc.Image,
-	}}, nil
+	var out []*Photo
+	for i, u := range imagesFromLD(body) {
+		out = append(out, &Photo{
+			ID:       id + "-ld-" + strconv.Itoa(i),
+			Location: id,
+			Original: u,
+			Large:    u,
+		})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 // WebSearch is the best-effort web typeahead. It queries TripAdvisor's typeahead
